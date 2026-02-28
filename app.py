@@ -1,12 +1,15 @@
-from flask import Flask, request
+from flask import Flask, request, send_file
 import requests
 import sqlite3
+import csv
+import os
+from datetime import datetime
 
 app = Flask(__name__)
 
-BOT_ID = "0d2777747c529b89f75d0e3194"
+BOT_ID = "PASTE_YOUR_BOT_ID_HERE"
 
-ADMINS = ["Matthew Varchol" , "Nick Scordos" , "Amanda Rickman"]
+ADMINS = ["Matthew Varchol"]
 
 # ---------------------
 # DATABASE SETUP
@@ -18,9 +21,8 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS sales (
             name TEXT PRIMARY KEY,
-            weekly_total INTEGER DEFAULT 0,
-            monthly_total INTEGER DEFAULT 0,
-            emoji TEXT DEFAULT ''
+            weekly_total INTEGER,
+            monthly_total INTEGER
         )
     """)
     conn.commit()
@@ -41,23 +43,12 @@ def update_sales(name, amount):
             WHERE name = ?
         """, (new_weekly, new_monthly, name))
     else:
+        new_weekly = amount
+        new_monthly = amount
         c.execute("""
-            INSERT INTO sales (name, weekly_total, monthly_total)
-            VALUES (?, ?, ?)
+            INSERT INTO sales VALUES (?, ?, ?)
         """, (name, amount, amount))
 
-    conn.commit()
-    conn.close()
-
-def set_emoji(name, emoji):
-    conn = sqlite3.connect("sales.db")
-    c = conn.cursor()
-
-    c.execute("SELECT name FROM sales WHERE name = ?", (name,))
-    if not c.fetchone():
-        c.execute("INSERT INTO sales (name) VALUES (?)", (name,))
-
-    c.execute("UPDATE sales SET emoji = ? WHERE name = ?", (emoji, name))
     conn.commit()
     conn.close()
 
@@ -66,9 +57,9 @@ def get_leaderboard(period="weekly"):
     c = conn.cursor()
 
     if period == "weekly":
-        c.execute("SELECT name, weekly_total, emoji FROM sales ORDER BY weekly_total DESC")
+        c.execute("SELECT name, weekly_total FROM sales ORDER BY weekly_total DESC")
     else:
-        c.execute("SELECT name, monthly_total, emoji FROM sales ORDER BY monthly_total DESC")
+        c.execute("SELECT name, monthly_total FROM sales ORDER BY monthly_total DESC")
 
     rows = c.fetchall()
     conn.close()
@@ -93,6 +84,30 @@ def post_message(text):
     requests.post(url, json={"bot_id": BOT_ID, "text": text})
 
 # ---------------------
+# EXPORT FUNCTION
+# ---------------------
+
+def export_csv(period="weekly"):
+    filename = f"{period}_sales_{datetime.now().strftime('%Y%m%d')}.csv"
+    conn = sqlite3.connect("sales.db")
+    c = conn.cursor()
+
+    if period == "weekly":
+        c.execute("SELECT name, weekly_total FROM sales")
+    else:
+        c.execute("SELECT name, monthly_total FROM sales")
+
+    rows = c.fetchall()
+    conn.close()
+
+    with open(filename, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["Agent Name", f"{period.capitalize()} Sales"])
+        writer.writerows(rows)
+
+    return filename
+
+# ---------------------
 # WEBHOOK
 # ---------------------
 
@@ -102,18 +117,6 @@ def webhook():
     name = data["name"]
     text = data["text"]
 
-    # -------- SET EMOJI --------
-    if text.lower().startswith("!setemoji"):
-        parts = text.split(" ", 1)
-        if len(parts) < 2:
-            post_message("Usage: !setemoji 😎")
-            return "ok", 200
-
-        emoji = parts[1].strip()
-        set_emoji(name, emoji)
-        post_message(f"{name} set their leaderboard emoji to {emoji}")
-        return "ok", 200
-
     # -------- SALES ENTRY --------
     if text.startswith("+") and text[1:].isdigit():
         amount = int(text[1:])
@@ -122,9 +125,8 @@ def webhook():
         leaderboard = get_leaderboard("weekly")
 
         message = "🏆 Weekly Sales Leaderboard\n\n"
-        for i, (n, t, e) in enumerate(leaderboard, 1):
-            emoji_display = f"{e} " if e else ""
-            message += f"{i}. {emoji_display}{n} – ${t:,} {milestone_label(t)}\n"
+        for i, (n, t) in enumerate(leaderboard, 1):
+            message += f"{i}. {n} – ${t:,} {milestone_label(t)}\n"
 
         post_message(message)
         return "ok", 200
@@ -176,6 +178,26 @@ def webhook():
         conn.close()
 
         post_message("🗓 Monthly totals reset by admin.")
+        return "ok", 200
+
+    # -------- EXPORT WEEKLY --------
+    if text.lower() == "!exportweekly":
+        if name not in ADMINS:
+            post_message("⛔ Unauthorized.")
+            return "ok", 200
+
+        filename = export_csv("weekly")
+        post_message(f"📁 Weekly sales exported: {filename}")
+        return "ok", 200
+
+    # -------- EXPORT MONTHLY --------
+    if text.lower() == "!exportmonthly":
+        if name not in ADMINS:
+            post_message("⛔ Unauthorized.")
+            return "ok", 200
+
+        filename = export_csv("monthly")
+        post_message(f"📁 Monthly sales exported: {filename}")
         return "ok", 200
 
     return "ok", 200
