@@ -1,14 +1,11 @@
-from flask import Flask, request, send_file
+from flask import Flask, request
 import requests
 import sqlite3
-import csv
 import os
-from datetime import datetime
 
 app = Flask(__name__)
 
 BOT_ID = "PASTE_YOUR_BOT_ID_HERE"
-
 ADMINS = ["Matthew Varchol"]
 
 # ---------------------
@@ -21,46 +18,56 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS sales (
             name TEXT PRIMARY KEY,
-            weekly_total INTEGER,
-            monthly_total INTEGER
+            weekly_sales INTEGER DEFAULT 0,
+            monthly_sales INTEGER DEFAULT 0,
+            weekly_leads INTEGER DEFAULT 0,
+            monthly_leads INTEGER DEFAULT 0,
+            emoji TEXT DEFAULT ''
         )
     """)
     conn.commit()
     conn.close()
 
-def update_sales(name, amount):
+def update_stats(name, sale_amount, leads):
     conn = sqlite3.connect("sales.db")
     c = conn.cursor()
-    c.execute("SELECT weekly_total, monthly_total FROM sales WHERE name = ?", (name,))
+    c.execute("""
+        SELECT weekly_sales, monthly_sales, weekly_leads, monthly_leads 
+        FROM sales WHERE name = ?
+    """, (name,))
     row = c.fetchone()
 
     if row:
-        new_weekly = row[0] + amount
-        new_monthly = row[1] + amount
+        new_weekly_sales = row[0] + sale_amount
+        new_monthly_sales = row[1] + sale_amount
+        new_weekly_leads = row[2] + leads
+        new_monthly_leads = row[3] + leads
+
         c.execute("""
             UPDATE sales
-            SET weekly_total = ?, monthly_total = ?
+            SET weekly_sales = ?, monthly_sales = ?,
+                weekly_leads = ?, monthly_leads = ?
             WHERE name = ?
-        """, (new_weekly, new_monthly, name))
+        """, (new_weekly_sales, new_monthly_sales,
+              new_weekly_leads, new_monthly_leads, name))
     else:
-        new_weekly = amount
-        new_monthly = amount
         c.execute("""
-            INSERT INTO sales VALUES (?, ?, ?)
-        """, (name, amount, amount))
+            INSERT INTO sales
+            (name, weekly_sales, monthly_sales, weekly_leads, monthly_leads)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, sale_amount, sale_amount, leads, leads))
 
     conn.commit()
     conn.close()
 
-def get_leaderboard(period="weekly"):
+def get_leaderboard():
     conn = sqlite3.connect("sales.db")
     c = conn.cursor()
-
-    if period == "weekly":
-        c.execute("SELECT name, weekly_total FROM sales ORDER BY weekly_total DESC")
-    else:
-        c.execute("SELECT name, monthly_total FROM sales ORDER BY monthly_total DESC")
-
+    c.execute("""
+        SELECT name, weekly_sales, weekly_leads, emoji
+        FROM sales
+        ORDER BY weekly_sales DESC
+    """)
     rows = c.fetchall()
     conn.close()
     return rows
@@ -79,33 +86,17 @@ def milestone_label(total):
     else:
         return ""
 
+def set_emoji(name, emoji):
+    conn = sqlite3.connect("sales.db")
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO sales (name) VALUES (?)", (name,))
+    c.execute("UPDATE sales SET emoji = ? WHERE name = ?", (emoji, name))
+    conn.commit()
+    conn.close()
+
 def post_message(text):
     url = "https://api.groupme.com/v3/bots/post"
     requests.post(url, json={"bot_id": BOT_ID, "text": text})
-
-# ---------------------
-# EXPORT FUNCTION
-# ---------------------
-
-def export_csv(period="weekly"):
-    filename = f"{period}_sales_{datetime.now().strftime('%Y%m%d')}.csv"
-    conn = sqlite3.connect("sales.db")
-    c = conn.cursor()
-
-    if period == "weekly":
-        c.execute("SELECT name, weekly_total FROM sales")
-    else:
-        c.execute("SELECT name, monthly_total FROM sales")
-
-    rows = c.fetchall()
-    conn.close()
-
-    with open(filename, "w", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow(["Agent Name", f"{period.capitalize()} Sales"])
-        writer.writerows(rows)
-
-    return filename
 
 # ---------------------
 # WEBHOOK
@@ -117,36 +108,68 @@ def webhook():
     name = data["name"]
     text = data["text"]
 
-    # -------- SALES ENTRY --------
-    if text.startswith("+") and text[1:].isdigit():
-        amount = int(text[1:])
-        update_sales(name, amount)
+    # -------- SET EMOJI --------
+    if text.lower().startswith("!setemoji"):
+        parts = text.split(" ", 1)
+        if len(parts) < 2:
+            post_message("Usage: !setemoji 😎")
+            return "ok", 200
 
-        leaderboard = get_leaderboard("weekly")
-
-        message = "🏆 Weekly Sales Leaderboard\n\n"
-        for i, (n, t) in enumerate(leaderboard, 1):
-            message += f"{i}. {n} – ${t:,} {milestone_label(t)}\n"
-
-        post_message(message)
+        emoji = parts[1].strip()
+        set_emoji(name, emoji)
+        post_message(f"{name} set their emoji to {emoji}")
         return "ok", 200
+
+    # -------- SALE + LEADS ENTRY --------
+    # Format: +3000 6
+    if text.startswith("+"):
+        parts = text[1:].split()
+
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            sale_amount = int(parts[0])
+            leads = int(parts[1])
+
+            update_stats(name, sale_amount, leads)
+
+            leaderboard = get_leaderboard()
+
+            message = "🏆 Weekly Sales Leaderboard\n\n"
+            for i, (n, sales, leads_count, e) in enumerate(leaderboard, 1):
+                emoji_display = f"{e} " if e else ""
+                message += (
+                    f"{i}. {emoji_display}{n} – "
+                    f"${sales:,} | {leads_count} leads "
+                    f"{milestone_label(sales)}\n"
+                )
+
+            post_message(message)
+            return "ok", 200
+        else:
+            post_message("Format: +3000 6  (sale amount then leads)")
+            return "ok", 200
 
     # -------- MY TOTAL --------
     if text.lower() == "!mytotal":
         conn = sqlite3.connect("sales.db")
         c = conn.cursor()
-        c.execute("SELECT weekly_total, monthly_total FROM sales WHERE name = ?", (name,))
+        c.execute("""
+            SELECT weekly_sales, monthly_sales,
+                   weekly_leads, monthly_leads
+            FROM sales WHERE name = ?
+        """, (name,))
         row = c.fetchone()
         conn.close()
 
         if row:
             post_message(
                 f"📊 {name}'s Totals\n\n"
-                f"Weekly: ${row[0]:,}\n"
-                f"Monthly: ${row[1]:,}"
+                f"Weekly Sales: ${row[0]:,}\n"
+                f"Weekly Leads: {row[2]}\n\n"
+                f"Monthly Sales: ${row[1]:,}\n"
+                f"Monthly Leads: {row[3]}"
             )
         else:
-            post_message(f"{name}, you have no recorded sales yet.")
+            post_message("No sales recorded yet.")
 
         return "ok", 200
 
@@ -158,11 +181,15 @@ def webhook():
 
         conn = sqlite3.connect("sales.db")
         c = conn.cursor()
-        c.execute("UPDATE sales SET weekly_total = 0")
+        c.execute("""
+            UPDATE sales
+            SET weekly_sales = 0,
+                weekly_leads = 0
+        """)
         conn.commit()
         conn.close()
 
-        post_message("📅 Weekly totals reset by admin.")
+        post_message("📅 Weekly stats reset.")
         return "ok", 200
 
     # -------- RESET MONTHLY --------
@@ -173,36 +200,18 @@ def webhook():
 
         conn = sqlite3.connect("sales.db")
         c = conn.cursor()
-        c.execute("UPDATE sales SET monthly_total = 0")
+        c.execute("""
+            UPDATE sales
+            SET monthly_sales = 0,
+                monthly_leads = 0
+        """)
         conn.commit()
         conn.close()
 
-        post_message("🗓 Monthly totals reset by admin.")
-        return "ok", 200
-
-    # -------- EXPORT WEEKLY --------
-    if text.lower() == "!exportweekly":
-        if name not in ADMINS:
-            post_message("⛔ Unauthorized.")
-            return "ok", 200
-
-        filename = export_csv("weekly")
-        post_message(f"📁 Weekly sales exported: {filename}")
-        return "ok", 200
-
-    # -------- EXPORT MONTHLY --------
-    if text.lower() == "!exportmonthly":
-        if name not in ADMINS:
-            post_message("⛔ Unauthorized.")
-            return "ok", 200
-
-        filename = export_csv("monthly")
-        post_message(f"📁 Monthly sales exported: {filename}")
+        post_message("🗓 Monthly stats reset.")
         return "ok", 200
 
     return "ok", 200
-
-import os
 
 if __name__ == "__main__":
     init_db()
