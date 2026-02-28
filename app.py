@@ -5,8 +5,8 @@ import os
 
 app = Flask(__name__)
 
-BOT_ID = "PASTE_YOUR_BOT_ID_HERE"
-ADMINS = ["Matthew Varchol"]
+BOT_ID = "0d2777747c529b89f75d0e3194"
+ADMINS = ["Matthew Varchol" , "Nick Scordos" , "Amanda Rickman"]
 
 # ---------------------
 # DATABASE SETUP
