@@ -1,11 +1,11 @@
 from flask import Flask, request
 import requests
 import sqlite3
-import os
 
 app = Flask(__name__)
 
 BOT_ID = "0d2777747c529b89f75d0e3194"
+
 ADMINS = ["Matthew Varchol" , "Nick Scordos" , "Amanda Rickman"]
 
 # ---------------------
@@ -18,56 +18,58 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS sales (
             name TEXT PRIMARY KEY,
-            weekly_sales INTEGER DEFAULT 0,
-            monthly_sales INTEGER DEFAULT 0,
-            weekly_leads INTEGER DEFAULT 0,
-            monthly_leads INTEGER DEFAULT 0,
+            weekly_total INTEGER DEFAULT 0,
+            monthly_total INTEGER DEFAULT 0,
             emoji TEXT DEFAULT ''
         )
     """)
     conn.commit()
     conn.close()
 
-def update_stats(name, sale_amount, leads):
+def update_sales(name, amount):
     conn = sqlite3.connect("sales.db")
     c = conn.cursor()
-    c.execute("""
-        SELECT weekly_sales, monthly_sales, weekly_leads, monthly_leads 
-        FROM sales WHERE name = ?
-    """, (name,))
+    c.execute("SELECT weekly_total, monthly_total FROM sales WHERE name = ?", (name,))
     row = c.fetchone()
 
     if row:
-        new_weekly_sales = row[0] + sale_amount
-        new_monthly_sales = row[1] + sale_amount
-        new_weekly_leads = row[2] + leads
-        new_monthly_leads = row[3] + leads
-
+        new_weekly = row[0] + amount
+        new_monthly = row[1] + amount
         c.execute("""
             UPDATE sales
-            SET weekly_sales = ?, monthly_sales = ?,
-                weekly_leads = ?, monthly_leads = ?
+            SET weekly_total = ?, monthly_total = ?
             WHERE name = ?
-        """, (new_weekly_sales, new_monthly_sales,
-              new_weekly_leads, new_monthly_leads, name))
+        """, (new_weekly, new_monthly, name))
     else:
         c.execute("""
-            INSERT INTO sales
-            (name, weekly_sales, monthly_sales, weekly_leads, monthly_leads)
-            VALUES (?, ?, ?, ?, ?)
-        """, (name, sale_amount, sale_amount, leads, leads))
+            INSERT INTO sales (name, weekly_total, monthly_total)
+            VALUES (?, ?, ?)
+        """, (name, amount, amount))
 
     conn.commit()
     conn.close()
 
-def get_leaderboard():
+def set_emoji(name, emoji):
     conn = sqlite3.connect("sales.db")
     c = conn.cursor()
-    c.execute("""
-        SELECT name, weekly_sales, weekly_leads, emoji
-        FROM sales
-        ORDER BY weekly_sales DESC
-    """)
+
+    c.execute("SELECT name FROM sales WHERE name = ?", (name,))
+    if not c.fetchone():
+        c.execute("INSERT INTO sales (name) VALUES (?)", (name,))
+
+    c.execute("UPDATE sales SET emoji = ? WHERE name = ?", (emoji, name))
+    conn.commit()
+    conn.close()
+
+def get_leaderboard(period="weekly"):
+    conn = sqlite3.connect("sales.db")
+    c = conn.cursor()
+
+    if period == "weekly":
+        c.execute("SELECT name, weekly_total, emoji FROM sales ORDER BY weekly_total DESC")
+    else:
+        c.execute("SELECT name, monthly_total, emoji FROM sales ORDER BY monthly_total DESC")
+
     rows = c.fetchall()
     conn.close()
     return rows
@@ -85,14 +87,6 @@ def milestone_label(total):
         return "⭐ 4K Starter"
     else:
         return ""
-
-def set_emoji(name, emoji):
-    conn = sqlite3.connect("sales.db")
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO sales (name) VALUES (?)", (name,))
-    c.execute("UPDATE sales SET emoji = ? WHERE name = ?", (emoji, name))
-    conn.commit()
-    conn.close()
 
 def post_message(text):
     url = "https://api.groupme.com/v3/bots/post"
@@ -117,59 +111,40 @@ def webhook():
 
         emoji = parts[1].strip()
         set_emoji(name, emoji)
-        post_message(f"{name} set their emoji to {emoji}")
+        post_message(f"{name} set their leaderboard emoji to {emoji}")
         return "ok", 200
 
-    # -------- SALE + LEADS ENTRY --------
-    # Format: +3000 6
-    if text.startswith("+"):
-        parts = text[1:].split()
+    # -------- SALES ENTRY --------
+    if text.startswith("+") and text[1:].isdigit():
+        amount = int(text[1:])
+        update_sales(name, amount)
 
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            sale_amount = int(parts[0])
-            leads = int(parts[1])
+        leaderboard = get_leaderboard("weekly")
 
-            update_stats(name, sale_amount, leads)
+        message = "🏆 Weekly Sales Leaderboard\n\n"
+        for i, (n, t, e) in enumerate(leaderboard, 1):
+            emoji_display = f"{e} " if e else ""
+            message += f"{i}. {emoji_display}{n} – ${t:,} {milestone_label(t)}\n"
 
-            leaderboard = get_leaderboard()
-
-            message = "🏆 Weekly Sales Leaderboard\n\n"
-            for i, (n, sales, leads_count, e) in enumerate(leaderboard, 1):
-                emoji_display = f"{e} " if e else ""
-                message += (
-                    f"{i}. {emoji_display}{n} – "
-                    f"${sales:,} | {leads_count} leads "
-                    f"{milestone_label(sales)}\n"
-                )
-
-            post_message(message)
-            return "ok", 200
-        else:
-            post_message("Format: +3000 6  (sale amount then leads)")
-            return "ok", 200
+        post_message(message)
+        return "ok", 200
 
     # -------- MY TOTAL --------
     if text.lower() == "!mytotal":
         conn = sqlite3.connect("sales.db")
         c = conn.cursor()
-        c.execute("""
-            SELECT weekly_sales, monthly_sales,
-                   weekly_leads, monthly_leads
-            FROM sales WHERE name = ?
-        """, (name,))
+        c.execute("SELECT weekly_total, monthly_total FROM sales WHERE name = ?", (name,))
         row = c.fetchone()
         conn.close()
 
         if row:
             post_message(
                 f"📊 {name}'s Totals\n\n"
-                f"Weekly Sales: ${row[0]:,}\n"
-                f"Weekly Leads: {row[2]}\n\n"
-                f"Monthly Sales: ${row[1]:,}\n"
-                f"Monthly Leads: {row[3]}"
+                f"Weekly: ${row[0]:,}\n"
+                f"Monthly: ${row[1]:,}"
             )
         else:
-            post_message("No sales recorded yet.")
+            post_message(f"{name}, you have no recorded sales yet.")
 
         return "ok", 200
 
@@ -181,15 +156,11 @@ def webhook():
 
         conn = sqlite3.connect("sales.db")
         c = conn.cursor()
-        c.execute("""
-            UPDATE sales
-            SET weekly_sales = 0,
-                weekly_leads = 0
-        """)
+        c.execute("UPDATE sales SET weekly_total = 0")
         conn.commit()
         conn.close()
 
-        post_message("📅 Weekly stats reset.")
+        post_message("📅 Weekly totals reset by admin.")
         return "ok", 200
 
     # -------- RESET MONTHLY --------
@@ -200,18 +171,16 @@ def webhook():
 
         conn = sqlite3.connect("sales.db")
         c = conn.cursor()
-        c.execute("""
-            UPDATE sales
-            SET monthly_sales = 0,
-                monthly_leads = 0
-        """)
+        c.execute("UPDATE sales SET monthly_total = 0")
         conn.commit()
         conn.close()
 
-        post_message("🗓 Monthly stats reset.")
+        post_message("🗓 Monthly totals reset by admin.")
         return "ok", 200
 
     return "ok", 200
+
+import os
 
 if __name__ == "__main__":
     init_db()
